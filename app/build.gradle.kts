@@ -47,4 +47,7 @@ dependencies {
     implementation(libs.camera.view)
 
     implementation(libs.recyclerview)
+
+    implementation(libs.exifinterface)
+    implementation(libs.camera.video)
 }

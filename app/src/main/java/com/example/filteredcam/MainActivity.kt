@@ -50,6 +50,17 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import android.widget.ImageButton
+import androidx.exifinterface.media.ExifInterface
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
+import android.os.Handler
+import android.os.Looper
 class MainActivity : AppCompatActivity() {
 
     private lateinit var liveImageView: ImageView
@@ -66,7 +77,42 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchCameraButton: ImageButton
     private var currentCameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
     private enum class FilterType { ORIGINAL, GRAYSCALE, SEPIA, INVERT, BRIGHT, VINTAGE, POLAROID, COOL_RETRO, CROSS_PROCESS }    private var selectedFilter = FilterType.ORIGINAL
+    private var videoCapture: VideoCapture<Recorder>? = null
+    private var activeRecording: Recording? = null
+    private lateinit var modeToggleButton: Button
+    private lateinit var recordingIndicator: android.widget.TextView
 
+    private enum class CaptureMode { PHOTO, VIDEO }
+    private var currentMode = CaptureMode.PHOTO
+
+    private var recordingSeconds = 0
+    private val recordingHandler = Handler(Looper.getMainLooper())
+    private val recordingTimerRunnable = object : Runnable {
+        override fun run() {
+            recordingSeconds++
+            val mins = recordingSeconds / 60
+            val secs = recordingSeconds % 60
+            recordingIndicator.text = String.format(Locale.US, "● REC %02d:%02d", mins, secs)
+            recordingHandler.postDelayed(this, 1000)
+        }
+    }
+    private val requestPermissionsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+            val cameraGranted = results[Manifest.permission.CAMERA] ?: false
+            if (cameraGranted) {
+                startCamera()
+            } else {
+                Toast.makeText(this, "Camera permission is required to use this app", Toast.LENGTH_LONG).show()
+            }
+            // Audio permission is checked separately when recording actually starts
+        }
+
+    private fun hasAudioPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+    }
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
@@ -79,7 +125,66 @@ class MainActivity : AppCompatActivity() {
                 ).show()
             }
         }
+    private fun toggleRecording() {
+        if (activeRecording != null) {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
 
+    @SuppressLint("MissingPermission")
+    private fun startRecording() {
+        if (!hasAudioPermission()) {
+            Toast.makeText(this, "Microphone permission is required to record video", Toast.LENGTH_LONG).show()
+            requestPermissionsLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+            return
+        }
+
+        val videoCapture = videoCapture ?: return
+
+        val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
+            .format(System.currentTimeMillis())
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/FilteredCam")
+        }
+
+        val outputOptions = MediaStoreOutputOptions.Builder(
+            contentResolver,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        ).setContentValues(contentValues).build()
+
+        activeRecording = videoCapture.output
+            .prepareRecording(this, outputOptions)
+            .withAudioEnabled()
+            .start(ContextCompat.getMainExecutor(this)) { event ->
+                when (event) {
+                    is VideoRecordEvent.Start -> {
+                        recordingSeconds = 0
+                        recordingIndicator.visibility = View.VISIBLE
+                        recordingHandler.post(recordingTimerRunnable)
+                    }
+                    is VideoRecordEvent.Finalize -> {
+                        recordingIndicator.visibility = View.GONE
+                        recordingHandler.removeCallbacks(recordingTimerRunnable)
+                        if (!event.hasError()) {
+                            Toast.makeText(this, "Video saved!", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(this, "Recording error: ${event.error}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    else -> {}
+                }
+            }
+    }
+
+    private fun stopRecording() {
+        activeRecording?.stop()
+        activeRecording = null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,7 +205,13 @@ class MainActivity : AppCompatActivity() {
 
         shutterSound.load(MediaActionSound.SHUTTER_CLICK)
 
-        captureButton.setOnClickListener { takePhoto() }
+        captureButton.setOnClickListener {
+            if (currentMode == CaptureMode.PHOTO) {
+                takePhoto()
+            } else {
+                toggleRecording()
+            }
+        }
 
         findViewById<ImageButton>(R.id.galleryButton).setOnClickListener {
             startActivity(Intent(this, GalleryActivity::class.java))
@@ -116,10 +227,19 @@ class MainActivity : AppCompatActivity() {
         if (hasCameraPermission()) {
             startCamera()
         } else {
-            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+            requestPermissionsLauncher.launch(
+                arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+            )
         }
         focusRing = findViewById(R.id.focusRing)
         zoomLabel = findViewById(R.id.zoomLabel)
+        modeToggleButton = findViewById(R.id.modeToggleButton)
+        recordingIndicator = findViewById(R.id.recordingIndicator)
+
+        modeToggleButton.setOnClickListener {
+            currentMode = if (currentMode == CaptureMode.PHOTO) CaptureMode.VIDEO else CaptureMode.PHOTO
+            modeToggleButton.text = if (currentMode == CaptureMode.PHOTO) "Photo" else "Video"
+        }
         scaleGestureDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 val cam = camera ?: return false
@@ -181,13 +301,23 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
+            val qualitySelector = QualitySelector.from(
+                Quality.HD,
+                FallbackStrategy.higherQualityOrLowerThan(Quality.SD)
+            )
+            val recorder = Recorder.Builder()
+                .setQualitySelector(qualitySelector)
+                .build()
+            videoCapture = VideoCapture.withOutput(recorder)
+
             try {
                 cameraProvider.unbindAll()
                 camera = cameraProvider.bindToLifecycle(
                     this,
                     currentCameraSelector,
                     imageCapture,
-                    imageAnalysis
+                    imageAnalysis,
+                    videoCapture
                 )
             } catch (exc: Exception) {
                 exc.printStackTrace()
@@ -195,8 +325,7 @@ class MainActivity : AppCompatActivity() {
             }
 
         }, ContextCompat.getMainExecutor(this))
-    }
-    private fun loadLastPhotoThumbnail() {
+    }    private fun loadLastPhotoThumbnail() {
         val projection = arrayOf(MediaStore.Images.Media._ID)
         val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
         val selectionArgs = arrayOf("%FilteredCam%")
@@ -334,8 +463,28 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     val originalBitmap = BitmapFactory.decodeFile(tempFile.absolutePath)
-                    val filteredBitmap = applyFilter(originalBitmap, selectedFilter)
+                    val correctedBitmap = correctOrientation(originalBitmap, tempFile.absolutePath)
+                    val filteredBitmap = applyFilter(correctedBitmap, selectedFilter)
                     saveBitmapToGallery(filteredBitmap)
+                }
+                private fun correctOrientation(bitmap: Bitmap, imagePath: String): Bitmap {
+                    val exif = ExifInterface(imagePath)
+                    val orientation = exif.getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL
+                    )
+
+                    val matrix = Matrix()
+                    when (orientation) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+                        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+                        else -> return bitmap // no rotation needed
+                    }
+
+                    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
                 }
             }
         )

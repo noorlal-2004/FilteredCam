@@ -1,0 +1,8 @@
+<ImageView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/photoThumbnail"
+    android:layout_width="match_parent"
+    android:layout_height="120dp"
+    android:layout_margin="2dp"
+    android:scaleType="centerCrop"
+    android:background="#222222" />

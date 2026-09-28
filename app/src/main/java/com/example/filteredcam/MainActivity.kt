@@ -64,7 +64,8 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-
+import android.widget.LinearLayout
+import android.widget.SeekBar
 @androidx.media3.common.util.UnstableApi
 class MainActivity : AppCompatActivity() {
 
@@ -86,7 +87,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var filterChips: Map<FilterType, TextView>
     private lateinit var flashOverlay: View
     private lateinit var processingIndicator: View
-
+    private val adjustments = ColorAdjustments()
+    @Volatile private var activeColorMatrix: ColorMatrix? = null
+    private val adjustResetters = mutableListOf<() -> Unit>()
+    private var exposureMinIndex = 0
+    private var exposureStepEv = 0f
     private val zoomHandler = Handler(Looper.getMainLooper())
     private val hideZoomRunnable = Runnable {
         zoomLabel.animate().alpha(0f).setDuration(300).start()
@@ -182,6 +187,7 @@ class MainActivity : AppCompatActivity() {
         modeVideoLabel.setOnClickListener { setMode(CaptureMode.VIDEO) }
 
         setupFilterButtons()
+        setupAdjustmentPanel()
         setupGestures()
         updateModeUI()
         loadLastPhotoThumbnail()
@@ -203,7 +209,129 @@ class MainActivity : AppCompatActivity() {
                 PackageManager.PERMISSION_GRANTED
 
     // ---------- UI setup ----------
+    private fun rebuildActiveMatrix() {
+        activeColorMatrix =
+            if (selectedFilter == FilterType.ORIGINAL && adjustments.isDefault) {
+                null
+            } else {
+                ColorMatrix(getColorMatrixForFilter(selectedFilter)).apply {
+                    if (!adjustments.isDefault) postConcat(adjustments.toColorMatrix())
+                }
+            }
+    }
 
+    private fun setupAdjustmentPanel() {
+        val panel = findViewById<View>(R.id.adjustPanel)
+        val rows = findViewById<LinearLayout>(R.id.adjustRows)
+        val doneButton = findViewById<TextView>(R.id.adjustDone)
+        doneButton.isSelected = true // white "primary" look
+
+        findViewById<ImageButton>(R.id.adjustButton).setOnClickListener {
+            panel.visibility = View.VISIBLE
+        }
+        doneButton.setOnClickListener { panel.visibility = View.GONE }
+        findViewById<TextView>(R.id.adjustReset).setOnClickListener {
+            adjustResetters.forEach { reset -> reset() }
+            resetExposure()
+        }
+
+        addAdjustRow(
+            parent = rows, label = "Brightness", min = -80f, max = 80f, default = 0f,
+            format = { String.format(Locale.US, "%+.0f", it) },
+            onChange = { adjustments.brightness = it; rebuildActiveMatrix() }
+        )
+        addAdjustRow(
+            parent = rows, label = "Contrast", min = 0.5f, max = 1.5f, default = 1f,
+            format = { String.format(Locale.US, "%.0f%%", it * 100) },
+            onChange = { adjustments.contrast = it; rebuildActiveMatrix() }
+        )
+        addAdjustRow(
+            parent = rows, label = "Saturation", min = 0f, max = 2f, default = 1f,
+            format = { String.format(Locale.US, "%.0f%%", it * 100) },
+            onChange = { adjustments.saturation = it; rebuildActiveMatrix() }
+        )
+        addAdjustRow(
+            parent = rows, label = "Hue", min = -180f, max = 180f, default = 0f,
+            format = { String.format(Locale.US, "%+.0f°", it) },
+            onChange = { adjustments.hue = it; rebuildActiveMatrix() }
+        )
+        addAdjustRow(
+            parent = rows, label = "Warmth", min = -100f, max = 100f, default = 0f,
+            format = { String.format(Locale.US, "%+.0f", it) },
+            onChange = { adjustments.warmth = it; rebuildActiveMatrix() }
+        )
+    }
+
+    private fun addAdjustRow(
+        parent: LinearLayout,
+        label: String,
+        min: Float,
+        max: Float,
+        default: Float,
+        format: (Float) -> String,
+        onChange: (Float) -> Unit
+    ) {
+        val row = layoutInflater.inflate(R.layout.item_adjust_row, parent, false)
+        val seek = row.findViewById<SeekBar>(R.id.rowSeek)
+        val valueText = row.findViewById<TextView>(R.id.rowValue)
+        row.findViewById<TextView>(R.id.rowLabel).text = label
+
+        // Sliders only deal in whole numbers 0..200, so map that to min.max
+        val defaultProgress = ((default - min) / (max - min) * seek.max).toInt()
+        seek.progress = defaultProgress
+        valueText.text = format(default)
+
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                val value = min + (max - min) * progress / sb.max
+                valueText.text = format(value)
+                onChange(value)
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {}
+        })
+
+        parent.addView(row)
+        adjustResetters.add { seek.progress = defaultProgress }
+    }
+
+    private fun setupExposure() {
+        val cam = camera ?: return
+        val state = cam.cameraInfo.exposureState
+        val seek = findViewById<SeekBar>(R.id.exposureSeek)
+        val label = findViewById<TextView>(R.id.exposureValue)
+
+        seek.setOnSeekBarChangeListener(null)
+
+        if (!state.isExposureCompensationSupported) {
+            seek.isEnabled = false
+            label.text = "N/A"
+            return
+        }
+
+        val range = state.exposureCompensationRange
+        exposureMinIndex = range.lower
+        exposureStepEv = state.exposureCompensationStep.toFloat()
+
+        seek.isEnabled = true
+        seek.max = range.upper - range.lower
+        seek.progress = -range.lower // the middle: index 0 = no compensation
+        label.text = "0.0 EV"
+
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                val index = progress + exposureMinIndex
+                camera?.cameraControl?.setExposureCompensationIndex(index)
+                label.text = String.format(Locale.US, "%+.1f EV", index * exposureStepEv)
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {}
+        })
+    }
+
+    private fun resetExposure() {
+        findViewById<SeekBar>(R.id.exposureSeek).progress = -exposureMinIndex
+    }
     private fun setupFilterButtons() {
         filterChips = mapOf(
             FilterType.ORIGINAL to findViewById<TextView>(R.id.filterOriginal),
@@ -222,6 +350,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun selectFilter(type: FilterType) {
         selectedFilter = type
+        rebuildActiveMatrix()
         filterChips.forEach { (t, chip) -> chip.isSelected = (t == type) }
 
         val scroll = findViewById<HorizontalScrollView>(R.id.filterScroll)
@@ -321,6 +450,7 @@ class MainActivity : AppCompatActivity() {
                     imageAnalysis,
                     videoCapture
                 )
+                setupExposure()
             } catch (exc: Exception) {
                 exc.printStackTrace()
                 Toast.makeText(this, "Failed to start camera: ${exc.message}", Toast.LENGTH_LONG).show()
@@ -344,7 +474,7 @@ class MainActivity : AppCompatActivity() {
         try {
             val bitmap = imageProxyToBitmap(imageProxy)
             val rotated = rotateBitmap(bitmap, imageProxy.imageInfo.rotationDegrees)
-            val filtered = applyFilter(rotated, selectedFilter)
+            val filtered = applyFilter(rotated)
             runOnUiThread { liveImageView.setImageBitmap(filtered) }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -443,7 +573,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     val original = BitmapFactory.decodeFile(tempFile.absolutePath)
                     val corrected = correctOrientation(original, tempFile.absolutePath)
-                    saveBitmapToGallery(applyFilter(corrected, selectedFilter))
+                    saveBitmapToGallery(applyFilter(corrected))
                 }
             }
         )
@@ -561,7 +691,7 @@ class MainActivity : AppCompatActivity() {
                         updateModeUI()
 
                         if (!event.hasError()) {
-                            if (selectedFilter != FilterType.ORIGINAL) {
+                            if (activeColorMatrix != null) {
                                 Toast.makeText(this, "Video saved! Applying filter...", Toast.LENGTH_SHORT).show()
                                 filterLastRecordedVideo(event.outputResults.outputUri)
                             } else {
@@ -586,7 +716,7 @@ class MainActivity : AppCompatActivity() {
         VideoFilterProcessor.applyFilterToVideo(
             context = this,
             sourceUri = videoUri,
-            colorMatrix = getColorMatrixForFilter(selectedFilter),
+            colorMatrix = activeColorMatrix ?: ColorMatrix(),
             onSuccess = { _ ->
                 runOnUiThread {
                     processingIndicator.visibility = View.GONE
@@ -669,17 +799,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applyFilter(bitmap: Bitmap, filter: FilterType): Bitmap {
-        if (filter == FilterType.ORIGINAL) return bitmap
+    private fun applyFilter(bitmap: Bitmap): Bitmap {
+        val matrix = activeColorMatrix ?: return bitmap
 
         val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-        val paint = Paint().apply {
-            colorFilter = ColorMatrixColorFilter(getColorMatrixForFilter(filter))
-        }
+        val paint = Paint().apply { colorFilter = ColorMatrixColorFilter(matrix) }
         Canvas(result).drawBitmap(bitmap, 0f, 0f, paint)
         return result
     }
-
     override fun onDestroy() {
         super.onDestroy()
         recordingHandler.removeCallbacks(recordingTimerRunnable)

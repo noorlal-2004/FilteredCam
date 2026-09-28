@@ -22,7 +22,15 @@ object MediaRepository {
         isVideo: Boolean,
         out: MutableList<MediaEntry>
     ): Int {
-        val projection = arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATE_ADDED)
+        val projection = if (isVideo) {
+            arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.DATE_ADDED,
+                MediaStore.Video.Media.DURATION
+            )
+        } else {
+            arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATE_ADDED)
+        }
         val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
         val args = arrayOf("%FilteredCam%")
         var count = 0
@@ -30,9 +38,13 @@ object MediaRepository {
         context.contentResolver.query(collection, projection, selection, args, null)?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
+            val durationCol =
+                if (isVideo) cursor.getColumnIndex(MediaStore.Video.Media.DURATION) else -1
+
             while (cursor.moveToNext()) {
                 val uri = ContentUris.withAppendedId(collection, cursor.getLong(idCol))
-                out.add(MediaEntry(uri, isVideo, cursor.getLong(dateCol)))
+                val duration = if (durationCol >= 0) cursor.getLong(durationCol) else 0L
+                out.add(MediaEntry(uri, isVideo, cursor.getLong(dateCol), duration))
                 count++
             }
         }

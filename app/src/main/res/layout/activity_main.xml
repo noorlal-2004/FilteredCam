@@ -17,11 +17,19 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
     <View
+        android:id="@+id/flashOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#FFFFFF"
+        android:alpha="0" />
+
+    <View
         android:id="@+id/focusRing"
         android:layout_width="70dp"
         android:layout_height="70dp"
         android:background="@drawable/focus_ring"
         android:visibility="invisible" />
+
     <TextView
         android:id="@+id/zoomLabel"
         android:layout_width="wrap_content"
@@ -30,26 +38,21 @@
         android:layout_marginStart="16dp"
         android:textColor="#FFFFFF"
         android:textSize="16sp"
-        android:background="#66000000"
-        android:padding="6dp"
+        android:background="@drawable/pill_bg"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:alpha="0"
         android:text="1.0x"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
-    <Button
-        android:id="@+id/modeToggleButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text="Photo"
-        android:background="#66000000"
-        android:textColor="#FFFFFF"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginEnd="16dp" />
+
     <TextView
         android:id="@+id/recordingIndicator"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
         android:text="● REC 00:00"
         android:textColor="#FF3B30"
         android:textSize="16sp"
@@ -58,15 +61,47 @@
         android:visibility="gone"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginTop="16dp" />
+        app:layout_constraintEnd_toEndOf="parent" />
+    <LinearLayout
+        android:id="@+id/processingIndicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="64dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/pill_bg"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <ProgressBar
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:indeterminate="true"
+            android:indeterminateTint="#FFFFFF" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:text="Processing video..."
+            android:textColor="#FFFFFF"
+            android:textSize="13sp" />
+    </LinearLayout>
+
     <HorizontalScrollView
         android:id="@+id/filterScroll"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="#66000000"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
         android:scrollbars="none"
-        app:layout_constraintBottom_toTopOf="@id/captureButton"
+        app:layout_constraintBottom_toTopOf="@id/modeRow"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
@@ -75,64 +110,59 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:gravity="center"
-            android:paddingVertical="8dp">
+            android:gravity="center_vertical"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp">
 
-            <Button
-                android:id="@+id/filterOriginal"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Original" />
-
-            <Button
-                android:id="@+id/filterGrayscale"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Grayscale" />
-
-            <Button
-                android:id="@+id/filterSepia"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Sepia" />
-
-            <Button
-                android:id="@+id/filterInvert"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Invert" />
-
-            <Button
-                android:id="@+id/filterBright"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Bright" />
-            <Button
-                android:id="@+id/filterVintage"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Vintage" />
-
-            <Button
-                android:id="@+id/filterPolaroid"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Polaroid" />
-
-            <Button
-                android:id="@+id/filterCoolRetro"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Cool Retro" />
-
-            <Button
-                android:id="@+id/filterCrossProcess"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Cross Process" />
+            <TextView android:id="@+id/filterOriginal" style="@style/FilterChip" android:text="Original" />
+            <TextView android:id="@+id/filterGrayscale" style="@style/FilterChip" android:text="Grayscale" />
+            <TextView android:id="@+id/filterSepia" style="@style/FilterChip" android:text="Sepia" />
+            <TextView android:id="@+id/filterInvert" style="@style/FilterChip" android:text="Invert" />
+            <TextView android:id="@+id/filterBright" style="@style/FilterChip" android:text="Bright" />
+            <TextView android:id="@+id/filterVintage" style="@style/FilterChip" android:text="Vintage" />
+            <TextView android:id="@+id/filterPolaroid" style="@style/FilterChip" android:text="Polaroid" />
+            <TextView android:id="@+id/filterCoolRetro" style="@style/FilterChip" android:text="Cool Retro" />
+            <TextView android:id="@+id/filterCrossProcess" style="@style/FilterChip" android:text="Cross Process" />
         </LinearLayout>
-
     </HorizontalScrollView>
+
+    <LinearLayout
+        android:id="@+id/modeRow"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="12dp"
+        app:layout_constraintBottom_toTopOf="@id/captureButton"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:id="@+id/modePhotoLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="PHOTO"
+            android:textColor="#FFFFFF"
+            android:textStyle="bold"
+            android:textSize="14sp"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp" />
+
+        <TextView
+            android:id="@+id/modeVideoLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="VIDEO"
+            android:textColor="#AAAAAA"
+            android:textStyle="bold"
+            android:textSize="14sp"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp" />
+    </LinearLayout>
+
     <ImageButton
         android:id="@+id/switchCameraButton"
         android:layout_width="48dp"
@@ -145,6 +175,7 @@
         android:contentDescription="Switch camera"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
+
     <View
         android:id="@+id/captureButton"
         android:layout_width="72dp"

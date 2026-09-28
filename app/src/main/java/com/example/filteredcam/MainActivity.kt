@@ -1,6 +1,10 @@
 package com.example.filteredcam
 
 import android.Manifest
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
+import android.annotation.SuppressLint
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -15,42 +19,31 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.media.MediaActionSound
+import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
-import android.widget.Button
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.View
+import android.widget.HorizontalScrollView
+import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.content.ContextCompat
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import android.animation.AnimatorSet
-import android.animation.ObjectAnimator
-import android.annotation.SuppressLint
-import android.view.MotionEvent
-import android.view.View
-import androidx.camera.core.Camera
-import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
-import android.view.ScaleGestureDetector
-import androidx.camera.core.ZoomState
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
-import android.widget.ImageButton
-import androidx.exifinterface.media.ExifInterface
+import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
@@ -59,32 +52,62 @@ import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
-import android.os.Handler
-import android.os.Looper
+import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.exifinterface.media.ExifInterface
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+@androidx.media3.common.util.UnstableApi
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var liveImageView: ImageView
-    private lateinit var captureButton: View
-    private var imageCapture: ImageCapture? = null
-    private var imageAnalysis: ImageAnalysis? = null
-    private lateinit var cameraExecutor: ExecutorService
-    private lateinit var scaleGestureDetector: ScaleGestureDetector
-    private var currentZoomRatio = 1f
-    private var camera: Camera? = null
-    private lateinit var focusRing: View
-    private val shutterSound = MediaActionSound()
-    private lateinit var zoomLabel: android.widget.TextView
-    private lateinit var switchCameraButton: ImageButton
-    private var currentCameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-    private enum class FilterType { ORIGINAL, GRAYSCALE, SEPIA, INVERT, BRIGHT, VINTAGE, POLAROID, COOL_RETRO, CROSS_PROCESS }    private var selectedFilter = FilterType.ORIGINAL
-    private var videoCapture: VideoCapture<Recorder>? = null
-    private var activeRecording: Recording? = null
-    private lateinit var modeToggleButton: Button
-    private lateinit var recordingIndicator: android.widget.TextView
+    private enum class FilterType {
+        ORIGINAL, GRAYSCALE, SEPIA, INVERT, BRIGHT, VINTAGE, POLAROID, COOL_RETRO, CROSS_PROCESS
+    }
 
     private enum class CaptureMode { PHOTO, VIDEO }
-    private var currentMode = CaptureMode.PHOTO
 
+    // Views
+    private lateinit var liveImageView: ImageView
+    private lateinit var captureButton: View
+    private lateinit var focusRing: View
+    private lateinit var zoomLabel: TextView
+    private lateinit var recordingIndicator: TextView
+    private lateinit var modePhotoLabel: TextView
+    private lateinit var modeVideoLabel: TextView
+    private lateinit var switchCameraButton: ImageButton
+    private lateinit var filterChips: Map<FilterType, TextView>
+    private lateinit var flashOverlay: View
+    private lateinit var processingIndicator: View
+
+    private val zoomHandler = Handler(Looper.getMainLooper())
+    private val hideZoomRunnable = Runnable {
+        zoomLabel.animate().alpha(0f).setDuration(300).start()
+    }
+    // Camera
+    private var camera: Camera? = null
+    private var imageCapture: ImageCapture? = null
+    private var imageAnalysis: ImageAnalysis? = null
+    private var videoCapture: VideoCapture<Recorder>? = null
+    private var activeRecording: Recording? = null
+    private lateinit var cameraExecutor: ExecutorService
+    private var currentCameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+    // State
+    private var selectedFilter = FilterType.ORIGINAL
+    private var currentMode = CaptureMode.PHOTO
+    private var currentZoomRatio = 1f
+    private lateinit var scaleGestureDetector: ScaleGestureDetector
+    private val shutterSound = MediaActionSound()
+
+    // Recording timer
     private var recordingSeconds = 0
     private val recordingHandler = Handler(Looper.getMainLooper())
     private val recordingTimerRunnable = object : Runnable {
@@ -96,104 +119,38 @@ class MainActivity : AppCompatActivity() {
             recordingHandler.postDelayed(this, 1000)
         }
     }
-    private val requestPermissionsLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
-            val cameraGranted = results[Manifest.permission.CAMERA] ?: false
-            if (cameraGranted) {
-                startCamera()
+
+    private val permissionsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+            if (hasCameraPermission()) {
+                if (camera == null) startCamera()
             } else {
                 Toast.makeText(this, "Camera permission is required to use this app", Toast.LENGTH_LONG).show()
             }
-            // Audio permission is checked separately when recording actually starts
-        }
-
-    private fun hasAudioPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-    }
-    private val requestPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
-                startCamera()
-            } else {
-                Toast.makeText(
-                    this,
-                    "Camera permission is required to use this app",
-                    Toast.LENGTH_LONG
-                ).show()
+            if (!hasAudioPermission()) {
+                Toast.makeText(this, "Microphone denied - videos will have no sound", Toast.LENGTH_LONG).show()
             }
         }
-    private fun toggleRecording() {
-        if (activeRecording != null) {
-            stopRecording()
-        } else {
-            startRecording()
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun startRecording() {
-        if (!hasAudioPermission()) {
-            Toast.makeText(this, "Microphone permission is required to record video", Toast.LENGTH_LONG).show()
-            requestPermissionsLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
-            return
-        }
-
-        val videoCapture = videoCapture ?: return
-
-        val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-            .format(System.currentTimeMillis())
-
-        val contentValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/FilteredCam")
-        }
-
-        val outputOptions = MediaStoreOutputOptions.Builder(
-            contentResolver,
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        ).setContentValues(contentValues).build()
-
-        activeRecording = videoCapture.output
-            .prepareRecording(this, outputOptions)
-            .withAudioEnabled()
-            .start(ContextCompat.getMainExecutor(this)) { event ->
-                when (event) {
-                    is VideoRecordEvent.Start -> {
-                        recordingSeconds = 0
-                        recordingIndicator.visibility = View.VISIBLE
-                        recordingHandler.post(recordingTimerRunnable)
-                    }
-                    is VideoRecordEvent.Finalize -> {
-                        recordingIndicator.visibility = View.GONE
-                        recordingHandler.removeCallbacks(recordingTimerRunnable)
-                        if (!event.hasError()) {
-                            Toast.makeText(this, "Video saved!", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(this, "Recording error: ${event.error}", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                    else -> {}
-                }
+    private fun animateShutterPress() {
+        captureButton.animate()
+            .scaleX(0.88f).scaleY(0.88f)
+            .setDuration(80)
+            .withEndAction {
+                captureButton.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
             }
+            .start()
     }
 
-    private fun stopRecording() {
-        activeRecording?.stop()
-        activeRecording = null
+    private fun flashScreen() {
+        flashOverlay.animate().cancel()
+        flashOverlay.alpha = 0.8f
+        flashOverlay.animate().alpha(0f).setDuration(200).start()
     }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Let content draw behind system bars
         WindowCompat.setDecorFitsSystemWindows(window, false)
-
-        // Hide status bar and navigation bar
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
         insetsController.hide(WindowInsetsCompat.Type.systemBars())
         insetsController.systemBarsBehavior =
@@ -201,88 +158,136 @@ class MainActivity : AppCompatActivity() {
 
         liveImageView = findViewById(R.id.liveImageView)
         captureButton = findViewById(R.id.captureButton)
+        focusRing = findViewById(R.id.focusRing)
+        zoomLabel = findViewById(R.id.zoomLabel)
+        recordingIndicator = findViewById(R.id.recordingIndicator)
+        modePhotoLabel = findViewById(R.id.modePhotoLabel)
+        modeVideoLabel = findViewById(R.id.modeVideoLabel)
+        switchCameraButton = findViewById(R.id.switchCameraButton)
         cameraExecutor = Executors.newSingleThreadExecutor()
-
+        flashOverlay = findViewById(R.id.flashOverlay)
+        processingIndicator = findViewById(R.id.processingIndicator)
         shutterSound.load(MediaActionSound.SHUTTER_CLICK)
 
         captureButton.setOnClickListener {
-            if (currentMode == CaptureMode.PHOTO) {
-                takePhoto()
-            } else {
-                toggleRecording()
-            }
-        }
+            animateShutterPress()
 
+            if (currentMode == CaptureMode.PHOTO) takePhoto() else toggleRecording()
+        }
         findViewById<ImageButton>(R.id.galleryButton).setOnClickListener {
             startActivity(Intent(this, GalleryActivity::class.java))
         }
-
-        switchCameraButton = findViewById(R.id.switchCameraButton)
         switchCameraButton.setOnClickListener { switchCamera() }
-
-        loadLastPhotoThumbnail()
+        modePhotoLabel.setOnClickListener { setMode(CaptureMode.PHOTO) }
+        modeVideoLabel.setOnClickListener { setMode(CaptureMode.VIDEO) }
 
         setupFilterButtons()
+        setupGestures()
+        updateModeUI()
+        loadLastPhotoThumbnail()
 
-        if (hasCameraPermission()) {
-            startCamera()
-        } else {
-            requestPermissionsLauncher.launch(
-                arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
-            )
-        }
-        focusRing = findViewById(R.id.focusRing)
-        zoomLabel = findViewById(R.id.zoomLabel)
-        modeToggleButton = findViewById(R.id.modeToggleButton)
-        recordingIndicator = findViewById(R.id.recordingIndicator)
+        val missing = listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+            .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (hasCameraPermission()) startCamera()
+        if (missing.isNotEmpty()) permissionsLauncher.launch(missing.toTypedArray())
+    }
 
-        modeToggleButton.setOnClickListener {
-            currentMode = if (currentMode == CaptureMode.PHOTO) CaptureMode.VIDEO else CaptureMode.PHOTO
-            modeToggleButton.text = if (currentMode == CaptureMode.PHOTO) "Photo" else "Video"
-        }
-        scaleGestureDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            override fun onScale(detector: ScaleGestureDetector): Boolean {
-                val cam = camera ?: return false
-                val zoomState = cam.cameraInfo.zoomState.value ?: return false
+    // ---------- Permissions ----------
 
-                val minZoom = zoomState.minZoomRatio
-                val maxZoom = zoomState.maxZoomRatio
+    private fun hasCameraPermission() =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
 
-                val delta = detector.scaleFactor
-                currentZoomRatio = (currentZoomRatio * delta).coerceIn(minZoom, maxZoom)
+    private fun hasAudioPermission() =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
 
-                cam.cameraControl.setZoomRatio(currentZoomRatio)
-                zoomLabel.text = String.format(Locale.US, "%.1fx", currentZoomRatio)
-                return true
+    // ---------- UI setup ----------
+
+    private fun setupFilterButtons() {
+        filterChips = mapOf(
+            FilterType.ORIGINAL to findViewById<TextView>(R.id.filterOriginal),
+            FilterType.GRAYSCALE to findViewById<TextView>(R.id.filterGrayscale),
+            FilterType.SEPIA to findViewById<TextView>(R.id.filterSepia),
+            FilterType.INVERT to findViewById<TextView>(R.id.filterInvert),
+            FilterType.BRIGHT to findViewById<TextView>(R.id.filterBright),
+            FilterType.VINTAGE to findViewById<TextView>(R.id.filterVintage),
+            FilterType.POLAROID to findViewById<TextView>(R.id.filterPolaroid),
+            FilterType.COOL_RETRO to findViewById<TextView>(R.id.filterCoolRetro),
+            FilterType.CROSS_PROCESS to findViewById<TextView>(R.id.filterCrossProcess)
+        )
+        filterChips.forEach { (type, chip) -> chip.setOnClickListener { selectFilter(type) } }
+        selectFilter(FilterType.ORIGINAL)
+    }
+
+    private fun selectFilter(type: FilterType) {
+        selectedFilter = type
+        filterChips.forEach { (t, chip) -> chip.isSelected = (t == type) }
+
+        val scroll = findViewById<HorizontalScrollView>(R.id.filterScroll)
+        filterChips[type]?.let { chip ->
+            scroll.post {
+                scroll.smoothScrollTo(chip.left - scroll.width / 2 + chip.width / 2, 0)
             }
-        })
+        }
+    }
+
+    private fun setMode(mode: CaptureMode) {
+        if (activeRecording != null) return // no switching mid-recording
+        currentMode = mode
+        updateModeUI()
+    }
+
+    private fun updateModeUI() {
+        val isPhoto = currentMode == CaptureMode.PHOTO
+
+        modePhotoLabel.setBackgroundResource(if (isPhoto) R.drawable.mode_selected_bg else 0)
+        modeVideoLabel.setBackgroundResource(if (isPhoto) 0 else R.drawable.mode_selected_bg)
+        modePhotoLabel.setTextColor(if (isPhoto) 0xFFFFFFFF.toInt() else 0xFFAAAAAA.toInt())
+        modeVideoLabel.setTextColor(if (isPhoto) 0xFFAAAAAA.toInt() else 0xFFFFFFFF.toInt())
+
+        captureButton.setBackgroundResource(
+            if (isPhoto) R.drawable.shutter_button else R.drawable.shutter_button_video
+        )
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupGestures() {
+        scaleGestureDetector = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val cam = camera ?: return false
+                    val zoomState = cam.cameraInfo.zoomState.value ?: return false
+
+                    currentZoomRatio = (currentZoomRatio * detector.scaleFactor)
+                        .coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
+
+                    cam.cameraControl.setZoomRatio(currentZoomRatio)
+                    zoomLabel.text = String.format(Locale.US, "%.1fx", currentZoomRatio)
+
+                    zoomLabel.animate().cancel()
+                    zoomLabel.alpha = 1f
+                    zoomHandler.removeCallbacks(hideZoomRunnable)
+                    zoomHandler.postDelayed(hideZoomRunnable, 1200)
+                    return true
+                }
+            })
 
         liveImageView.setOnTouchListener { view, event ->
             scaleGestureDetector.onTouchEvent(event)
-            if (event.action == MotionEvent.ACTION_UP && event.pointerCount == 1 && !scaleGestureDetector.isInProgress) {
+            if (event.action == MotionEvent.ACTION_UP &&
+                event.pointerCount == 1 &&
+                !scaleGestureDetector.isInProgress
+            ) {
                 focusOnTouch(event.x, event.y)
             }
             view.performClick()
             true
         }
     }
-    private fun setupFilterButtons() {
-        findViewById<Button>(R.id.filterOriginal).setOnClickListener { selectedFilter = FilterType.ORIGINAL }
-        findViewById<Button>(R.id.filterGrayscale).setOnClickListener { selectedFilter = FilterType.GRAYSCALE }
-        findViewById<Button>(R.id.filterSepia).setOnClickListener { selectedFilter = FilterType.SEPIA }
-        findViewById<Button>(R.id.filterInvert).setOnClickListener { selectedFilter = FilterType.INVERT }
-        findViewById<Button>(R.id.filterBright).setOnClickListener { selectedFilter = FilterType.BRIGHT }
-        findViewById<Button>(R.id.filterVintage).setOnClickListener { selectedFilter = FilterType.VINTAGE }
-        findViewById<Button>(R.id.filterPolaroid).setOnClickListener { selectedFilter = FilterType.POLAROID }
-        findViewById<Button>(R.id.filterCoolRetro).setOnClickListener { selectedFilter = FilterType.COOL_RETRO }
-        findViewById<Button>(R.id.filterCrossProcess).setOnClickListener { selectedFilter = FilterType.CROSS_PROCESS }
-    }
-    private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
-    }
+
+    // ---------- Camera ----------
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
@@ -295,18 +300,15 @@ class MainActivity : AppCompatActivity() {
             imageAnalysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-                .also {
-                    it.setAnalyzer(cameraExecutor) { imageProxy ->
-                        processFrame(imageProxy)
-                    }
-                }
+                .also { it.setAnalyzer(cameraExecutor) { proxy -> processFrame(proxy) } }
 
-            val qualitySelector = QualitySelector.from(
-                Quality.HD,
-                FallbackStrategy.higherQualityOrLowerThan(Quality.SD)
-            )
             val recorder = Recorder.Builder()
-                .setQualitySelector(qualitySelector)
+                .setQualitySelector(
+                    QualitySelector.from(
+                        Quality.HD,
+                        FallbackStrategy.higherQualityOrLowerThan(Quality.SD)
+                    )
+                )
                 .build()
             videoCapture = VideoCapture.withOutput(recorder)
 
@@ -323,39 +325,19 @@ class MainActivity : AppCompatActivity() {
                 exc.printStackTrace()
                 Toast.makeText(this, "Failed to start camera: ${exc.message}", Toast.LENGTH_LONG).show()
             }
-
         }, ContextCompat.getMainExecutor(this))
-    }    private fun loadLastPhotoThumbnail() {
-        val projection = arrayOf(MediaStore.Images.Media._ID)
-        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        val selectionArgs = arrayOf("%FilteredCam%")
-        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
-
-        contentResolver.query(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            selection,
-            selectionArgs,
-            sortOrder
-        )?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                val id = cursor.getLong(idColumn)
-                val uri = android.content.ContentUris.withAppendedId(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    id
-                )
-                findViewById<ImageButton>(R.id.galleryButton).setImageURI(uri)
-            }
-        }
     }
+
     private fun switchCamera() {
-        currentCameraSelector = if (currentCameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            CameraSelector.DEFAULT_BACK_CAMERA
-        }
-        startCamera() // rebinds everything with the new selector
+        if (activeRecording != null) return
+        currentCameraSelector =
+            if (currentCameraSelector == CameraSelector.DEFAULT_BACK_CAMERA)
+                CameraSelector.DEFAULT_FRONT_CAMERA
+            else
+                CameraSelector.DEFAULT_BACK_CAMERA
+        currentZoomRatio = 1f
+        zoomLabel.text = "1.0x"
+        startCamera()
     }
 
     private fun processFrame(imageProxy: ImageProxy) {
@@ -363,57 +345,14 @@ class MainActivity : AppCompatActivity() {
             val bitmap = imageProxyToBitmap(imageProxy)
             val rotated = rotateBitmap(bitmap, imageProxy.imageInfo.rotationDegrees)
             val filtered = applyFilter(rotated, selectedFilter)
-
-            runOnUiThread {
-                liveImageView.setImageBitmap(filtered)
-            }
+            runOnUiThread { liveImageView.setImageBitmap(filtered) }
         } catch (e: Exception) {
             e.printStackTrace()
         } finally {
-            imageProxy.close() // CRITICAL: always close, or the camera freezes
+            imageProxy.close()
         }
     }
-    @SuppressLint("ClickableViewAccessibility")
-    private fun focusOnTouch(x: Float, y: Float) {
-        val cam = camera ?: return
 
-        val factory = SurfaceOrientedMeteringPointFactory(
-            liveImageView.width.toFloat(),
-            liveImageView.height.toFloat()
-        )
-        val meteringPoint = factory.createPoint(x, y)
-
-        val action = FocusMeteringAction.Builder(meteringPoint)
-            .setAutoCancelDuration(3, java.util.concurrent.TimeUnit.SECONDS)
-            .build()
-
-        cam.cameraControl.startFocusAndMetering(action)
-
-        showFocusRing(x, y)
-    }
-
-    private fun showFocusRing(x: Float, y: Float) {
-        focusRing.x = x - (focusRing.width / 2f)
-        focusRing.y = y - (focusRing.height / 2f)
-        focusRing.visibility = View.VISIBLE
-        focusRing.alpha = 1f
-        focusRing.scaleX = 1.3f
-        focusRing.scaleY = 1.3f
-
-        val scaleX = ObjectAnimator.ofFloat(focusRing, "scaleX", 1.3f, 1f)
-        val scaleY = ObjectAnimator.ofFloat(focusRing, "scaleY", 1.3f, 1f)
-        val fadeOut = ObjectAnimator.ofFloat(focusRing, "alpha", 1f, 0f).apply {
-            startDelay = 600
-            duration = 300
-        }
-
-        AnimatorSet().apply {
-            playTogether(scaleX, scaleY)
-            duration = 200
-            start()
-        }
-        fadeOut.start()
-    }
     private fun imageProxyToBitmap(image: ImageProxy): Bitmap {
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
@@ -441,11 +380,51 @@ class MainActivity : AppCompatActivity() {
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
+    private fun focusOnTouch(x: Float, y: Float) {
+        val cam = camera ?: return
+
+        val factory = SurfaceOrientedMeteringPointFactory(
+            liveImageView.width.toFloat(),
+            liveImageView.height.toFloat()
+        )
+        val action = FocusMeteringAction.Builder(factory.createPoint(x, y))
+            .setAutoCancelDuration(3, TimeUnit.SECONDS)
+            .build()
+
+        cam.cameraControl.startFocusAndMetering(action)
+        showFocusRing(x, y)
+    }
+
+    private fun showFocusRing(x: Float, y: Float) {
+        focusRing.x = x - (focusRing.width / 2f)
+        focusRing.y = y - (focusRing.height / 2f)
+        focusRing.visibility = View.VISIBLE
+        focusRing.alpha = 1f
+        focusRing.scaleX = 1.3f
+        focusRing.scaleY = 1.3f
+
+        val scaleX = ObjectAnimator.ofFloat(focusRing, "scaleX", 1.3f, 1f)
+        val scaleY = ObjectAnimator.ofFloat(focusRing, "scaleY", 1.3f, 1f)
+        val fadeOut = ObjectAnimator.ofFloat(focusRing, "alpha", 1f, 0f).apply {
+            startDelay = 600
+            duration = 300
+        }
+
+        AnimatorSet().apply {
+            playTogether(scaleX, scaleY)
+            duration = 200
+            start()
+        }
+        fadeOut.start()
+    }
+
+    // ---------- Photo ----------
+
     private fun takePhoto() {
         val imageCapture = imageCapture ?: return
 
         shutterSound.play(MediaActionSound.SHUTTER_CLICK)
-
+        flashScreen()
         val tempFile = File(externalCacheDir ?: cacheDir, "temp_capture.jpg")
         val outputOptions = ImageCapture.OutputFileOptions.Builder(tempFile).build()
 
@@ -462,38 +441,174 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    val originalBitmap = BitmapFactory.decodeFile(tempFile.absolutePath)
-                    val correctedBitmap = correctOrientation(originalBitmap, tempFile.absolutePath)
-                    val filteredBitmap = applyFilter(correctedBitmap, selectedFilter)
-                    saveBitmapToGallery(filteredBitmap)
-                }
-                private fun correctOrientation(bitmap: Bitmap, imagePath: String): Bitmap {
-                    val exif = ExifInterface(imagePath)
-                    val orientation = exif.getAttributeInt(
-                        ExifInterface.TAG_ORIENTATION,
-                        ExifInterface.ORIENTATION_NORMAL
-                    )
-
-                    val matrix = Matrix()
-                    when (orientation) {
-                        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
-                        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-                        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
-                        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
-                        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
-                        else -> return bitmap // no rotation needed
-                    }
-
-                    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                    val original = BitmapFactory.decodeFile(tempFile.absolutePath)
+                    val corrected = correctOrientation(original, tempFile.absolutePath)
+                    saveBitmapToGallery(applyFilter(corrected, selectedFilter))
                 }
             }
         )
     }
 
-    private fun applyFilter(bitmap: Bitmap, filter: FilterType): Bitmap {
-        if (filter == FilterType.ORIGINAL) return bitmap
+    private fun correctOrientation(bitmap: Bitmap, imagePath: String): Bitmap {
+        val exif = ExifInterface(imagePath)
+        val orientation = exif.getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL
+        )
 
-        val colorMatrix = when (filter) {
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+            else -> return bitmap
+        }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
+
+    private fun saveBitmapToGallery(bitmap: Bitmap) {
+        val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
+            .format(System.currentTimeMillis())
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/FilteredCam")
+        }
+
+        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+
+        uri?.let {
+            contentResolver.openOutputStream(it)?.use { stream ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)
+            }
+            Toast.makeText(this, "Filtered photo saved!", Toast.LENGTH_SHORT).show()
+            loadLastPhotoThumbnail()
+        } ?: run {
+            Toast.makeText(this, "Failed to save photo", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun loadLastPhotoThumbnail() {
+        val projection = arrayOf(MediaStore.Images.Media._ID)
+        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+        val selectionArgs = arrayOf("%FilteredCam%")
+        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+
+        contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            selectionArgs,
+            sortOrder
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
+                val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                findViewById<ImageButton>(R.id.galleryButton).setImageURI(uri)
+            }
+        }
+    }
+
+    // ---------- Video ----------
+
+    private fun toggleRecording() {
+        if (activeRecording != null) stopRecording() else startRecording()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startRecording() {
+        if (!hasAudioPermission()) {
+            Toast.makeText(this, "Allow the microphone, then tap record again", Toast.LENGTH_LONG).show()
+            permissionsLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+            return
+        }
+
+        val videoCapture = videoCapture ?: return
+
+        val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
+            .format(System.currentTimeMillis())
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/FilteredCam")
+        }
+
+        val outputOptions = MediaStoreOutputOptions.Builder(
+            contentResolver,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        ).setContentValues(contentValues).build()
+
+        activeRecording = videoCapture.output
+            .prepareRecording(this, outputOptions)
+            .withAudioEnabled()
+            .start(ContextCompat.getMainExecutor(this)) { event ->
+                when (event) {
+                    is VideoRecordEvent.Start -> {
+                        recordingSeconds = 0
+                        recordingIndicator.text = "● REC 00:00"
+                        recordingIndicator.visibility = View.VISIBLE
+                        recordingHandler.post(recordingTimerRunnable)
+                        captureButton.setBackgroundResource(R.drawable.shutter_recording)
+                    }
+                    is VideoRecordEvent.Finalize -> {
+                        activeRecording = null
+                        recordingIndicator.visibility = View.GONE
+                        recordingHandler.removeCallbacks(recordingTimerRunnable)
+                        updateModeUI()
+
+                        if (!event.hasError()) {
+                            if (selectedFilter != FilterType.ORIGINAL) {
+                                Toast.makeText(this, "Video saved! Applying filter...", Toast.LENGTH_SHORT).show()
+                                filterLastRecordedVideo(event.outputResults.outputUri)
+                            } else {
+                                Toast.makeText(this, "Video saved!", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            Toast.makeText(this, "Recording error: ${event.error}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    else -> {}
+                }
+            }
+    }
+
+    private fun stopRecording() {
+        activeRecording?.stop()
+    }
+
+    private fun filterLastRecordedVideo(videoUri: Uri) {
+        processingIndicator.visibility = View.VISIBLE
+
+        VideoFilterProcessor.applyFilterToVideo(
+            context = this,
+            sourceUri = videoUri,
+            colorMatrix = getColorMatrixForFilter(selectedFilter),
+            onSuccess = { _ ->
+                runOnUiThread {
+                    processingIndicator.visibility = View.GONE
+                    Toast.makeText(this, "Filtered video saved!", Toast.LENGTH_LONG).show()
+                }
+                // Remove the unfiltered original now that filtering succeeded
+                contentResolver.delete(videoUri, null, null)
+            },
+            onError = { error ->
+                runOnUiThread {
+                    processingIndicator.visibility = View.GONE
+                    Toast.makeText(this, "Video filter failed: $error", Toast.LENGTH_LONG).show()
+                }
+                // Keep the original if filtering failed
+            }
+        )
+    }
+    // ---------- Filters ----------
+
+    private fun getColorMatrixForFilter(filter: FilterType): ColorMatrix {
+        return when (filter) {
+            FilterType.ORIGINAL -> ColorMatrix()
             FilterType.GRAYSCALE -> ColorMatrix().apply { setSaturation(0f) }
             FilterType.SEPIA -> ColorMatrix(
                 floatArrayOf(
@@ -551,42 +666,26 @@ class MainActivity : AppCompatActivity() {
                     0f, 0f, 0f, 1f, 0f
                 )
             )
-            else -> ColorMatrix()
         }
-
-        val resultBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(resultBitmap)
-        val paint = Paint()
-        paint.colorFilter = ColorMatrixColorFilter(colorMatrix)
-        canvas.drawBitmap(bitmap, 0f, 0f, paint)
-        return resultBitmap
     }
-    private fun saveBitmapToGallery(bitmap: Bitmap) {
-        val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-            .format(System.currentTimeMillis())
 
-        val contentValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/FilteredCam")
+    private fun applyFilter(bitmap: Bitmap, filter: FilterType): Bitmap {
+        if (filter == FilterType.ORIGINAL) return bitmap
+
+        val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val paint = Paint().apply {
+            colorFilter = ColorMatrixColorFilter(getColorMatrixForFilter(filter))
         }
-
-        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-
-        uri?.let {
-            contentResolver.openOutputStream(it)?.use { stream ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)
-            }
-            Toast.makeText(this, "Filtered photo saved!", Toast.LENGTH_SHORT).show()
-            loadLastPhotoThumbnail() // refresh thumbnail with the photo we just took
-        } ?: run {
-            Toast.makeText(this, "Failed to save photo", Toast.LENGTH_SHORT).show()
-        }
+        Canvas(result).drawBitmap(bitmap, 0f, 0f, paint)
+        return result
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        recordingHandler.removeCallbacks(recordingTimerRunnable)
+        activeRecording?.stop()
         shutterSound.release()
         cameraExecutor.shutdown()
+        zoomHandler.removeCallbacks(hideZoomRunnable)
     }
 }

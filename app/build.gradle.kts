@@ -50,4 +50,9 @@ dependencies {
 
     implementation(libs.exifinterface)
     implementation(libs.camera.video)
+    implementation(libs.media3.transformer)
+    implementation(libs.media3.effect)
+    implementation(libs.media3.common)
+    implementation(libs.viewpager2)
+    implementation(libs.glide)
 }
